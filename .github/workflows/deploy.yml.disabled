@@ -1,0 +1,98 @@
+name: Build and Deploy to Google Cloud Run
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch: # Cho phép trigger chạy bằng tay từ giao diện GitHub Actions
+
+env:
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }} # ID dự án Google Cloud của bạn
+  REGION: ${{ secrets.GCP_REGION }}         # Vùng đặt dịch vụ (ví dụ: asia-east1)
+  SERVICE_NAME: safe-stream                  # Tên dịch vụ Cloud Run
+  REPOSITORY_NAME: safe-repo                # Tên repository trong Artifact Registry
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # Bắt buộc đối với Workload Identity Federation
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Bước 1: Xác thực với Google Cloud
+      # Hỗ trợ cả 2 cơ chế đăng nhập (Service Account Key và Workload Identity Federation)
+      - name: Google Auth
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          # CÁCH 1: Sử dụng Service Account Key (Đơn giản nhất cho cá nhân)
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+          # CÁCH 2: Sử dụng Workload Identity Federation (Nếu cấu hình thì bỏ comment 2 dòng dưới và comment dòng credentials_json)
+          # workload_identity_provider: ${{ secrets.GCP_WIP_PROVIDER }}
+          # service_account: ${{ secrets.GCP_WIP_SERVICE_ACCOUNT }}
+
+      # Bước 2: Thiết lập Google Cloud SDK
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      # Bước 3: Tự động khởi tạo Repository trong Artifact Registry nếu chưa tồn tại
+      - name: Create Artifact Registry Repository
+        run: |
+          gcloud artifacts repositories describe ${{ env.REPOSITORY_NAME }} --location=${{ env.REGION }} || \
+          gcloud artifacts repositories create ${{ env.REPOSITORY_NAME }} \
+            --repository-format=docker \
+            --location=${{ env.REGION }} \
+            --description="Docker repository for Safe Stream"
+
+      # Bước 4: Đăng nhập vào Google Artifact Registry để push Docker image
+      - name: Log in to Google Artifact Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGION }}-docker.pkg.dev
+          username: _json_key
+          password: ${{ secrets.GCP_SA_KEY }}
+
+      # Bước 5: Cấu hình QEMU và Docker Buildx phục vụ build tối ưu
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Bước 6: Trích xuất metadata (tags, labels) cho Docker image
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY_NAME }}/${{ env.SERVICE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=sha,format=long
+            latest
+
+      # Bước 7: Build và push Docker image lên Artifact Registry
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Bước 8: Deploy Docker image lên Google Cloud Run
+      - name: Deploy to Google Cloud Run
+        id: deploy
+        uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: ${{ env.SERVICE_NAME }}
+          region: ${{ env.REGION }}
+          image: ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY_NAME }}/${{ env.SERVICE_NAME }}:latest
+          # --allow-unauthenticated cho phép truy cập public qua HTTPS (bảo mật đã được xử lý bởi code của bạn qua Google Auth)
+          # Chỉ định chạy dịch vụ bằng chính tài khoản github-actions-deployer vì tài khoản mặc định của GCP không tồn tại trong dự án
+          flags: --allow-unauthenticated --service-account=github-actions-deployer@${{ env.PROJECT_ID }}.iam.gserviceaccount.com
