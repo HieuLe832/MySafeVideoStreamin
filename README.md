@@ -4,11 +4,11 @@
 
 ---
 
-# Tech Stack (gọn)
+# Tech Stack 
 * Backend: Rust
 * Frontend: TypeScript (React)
 * Storage: Cloudflare R2
-* Xác thực: Google Auth (GG Auth)
+* Xác thực: Google Auth 
 * ...  (chi tiết xem ở [ChiTiet.md](./ChiTiet.md))
 
 ---
